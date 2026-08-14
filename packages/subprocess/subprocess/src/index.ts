@@ -44,12 +44,26 @@ export type {
 export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i
 
 /**
+ * Environment names that describe how *this* process was launched and would
+ * change how a child behaves if inherited.
+ *
+ * `ELECTRON_RUN_AS_NODE` is set on the harness when a desktop shell starts it
+ * through the Electron binary. Inheriting it makes every subsequent Electron
+ * binary a tool invokes run as a bare Node interpreter instead of launching its
+ * application, so it is dropped here and re-supplied explicitly by the one
+ * spawner that relaunches `process.execPath`.
+ */
+const LAUNCH_MODE_ENV_NAMES = new Set(['ELECTRON_RUN_AS_NODE'])
+
+/**
  * The ambient parent environment minus credential-shaped names and minus all
  * `DSH_*` names — the canonical base every harness child starts from. `PATH`,
  * `HOME`, locale, and proxy variables survive, so child CLIs run normally;
- * harness identity never leaks implicitly (a deliberately forwarded
- * credential or current `DSH_*` fact goes through the spec's explicit `env`,
- * which merges after this scrub). Both scrubs match case-insensitively:
+ * harness identity never leaks implicitly (a deliberately forwarded credential
+ * or current `DSH_*` fact goes through the spec's explicit `env`, which merges
+ * after this scrub). Launch-mode names that would change how a child
+ * interprets its own binary are dropped on the same basis (see
+ * {@link LAUNCH_MODE_ENV_NAMES}). Both scrubs match case-insensitively:
  * Windows environment names are case-insensitive, so a parent `dsh_*` entry
  * would otherwise survive and read back as `$env:DSH_*` in the child;
  * deliberate lowercase `dsh_*` names on POSIX are implausible. Exported as a plain function so spawners
@@ -60,7 +74,10 @@ export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i
 export function scrubbedParentEnv(): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && !SENSITIVE_ENV_PATTERN.test(key) && !key.toUpperCase().startsWith(DSH_ENV_PREFIX)) env[key] = value
+    if (value === undefined) continue
+    if (SENSITIVE_ENV_PATTERN.test(key) || key.toUpperCase().startsWith(DSH_ENV_PREFIX)) continue
+    if (LAUNCH_MODE_ENV_NAMES.has(key.toUpperCase())) continue
+    env[key] = value
   }
   return env
 }
