@@ -64,7 +64,13 @@ const BOOT_PROBE_TIMEOUT_MS = 90_000
  * @param options - extra spawn options merged over the defaults.
  */
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { stdio: 'inherit', cwd: REPO_ROOT, ...options })
+  // Windows exposes npm-installed launchers (`pnpm`, `electron-builder`) as
+  // `.cmd` shims, and Node refuses to execute a batch file without a shell.
+  // Everything passed through here is a path or a plain flag, so quoting each
+  // token is enough to survive cmd.exe's parsing.
+  const shell = process.platform === 'win32'
+  const quote = value => (shell ? `"${value}"` : value)
+  const result = spawnSync(quote(command), args.map(quote), { stdio: 'inherit', cwd: REPO_ROOT, shell, ...options })
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} exited with ${result.status ?? `signal ${result.signal}`}`)
 }
@@ -322,7 +328,9 @@ rmSync(OUT_DIR, { recursive: true, force: true })
 // Run from the staged tree so electron-builder treats it as the project, but
 // invoke the binary by resolved path: the staging directory is a deploy output,
 // not a workspace member, so `pnpm exec` has no project context there.
-const builderBin = path.join(APP_DIR, 'node_modules', '.bin', 'electron-builder')
+// `.cmd` on Windows: the `.bin` directory holds batch shims there, not
+// extension-less executables.
+const builderBin = path.join(APP_DIR, 'node_modules', '.bin', process.platform === 'win32' ? 'electron-builder.cmd' : 'electron-builder')
 if (!existsSync(builderBin)) throw new Error(`packaging: ${builderBin} is missing; run \`pnpm install\` at the repo root first.`)
 // Host platform only, deliberately. The staged tree carries whatever native
 // binaries `pnpm deploy` resolved for the host, and `sharp` publishes one
