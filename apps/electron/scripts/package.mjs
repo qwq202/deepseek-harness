@@ -29,7 +29,7 @@
  * must be importable. Until then this loop stands in for it.
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createConnection } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -39,16 +39,22 @@ import { fileURLToPath } from 'node:url'
 const APP_DIR = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const REPO_ROOT = path.resolve(APP_DIR, '..', '..')
 /**
- * Staging directory, deliberately outside the repository.
+ * Staging directory: outside the repository, and freshly created per run.
  *
- * Node resolves a missing package by walking up every ancestor directory's
- * `node_modules`. Staging anywhere under the repo puts the repo's own fully
- * populated `node_modules` on that walk-up path, so the gap-fill probe below
- * would resolve against the developer's install and report a complete tree
- * that is in fact missing packages — a failure that only surfaces once the
- * app is packaged and no longer has the repo above it.
+ * Outside, because Node resolves a missing package by walking up every ancestor
+ * directory's `node_modules`. Staging anywhere under the repo puts the repo's
+ * own fully populated `node_modules` on that walk-up path, so the gap-fill
+ * probe below would resolve against the developer's install and report a
+ * complete tree that is in fact missing packages — a failure that only
+ * surfaces once the app is packaged and no longer has the repo above it.
+ *
+ * Freshly created, because this script deletes the staging tree recursively.
+ * A fixed name under a world-writable temp directory can be pre-created as a
+ * symlink or junction pointing somewhere else, which turns that delete into a
+ * delete of the link's target. `mkdtemp` returns a new directory that no other
+ * user could have prepared.
  */
-const STAGE_DIR = path.join(tmpdir(), 'dsh-electron-stage')
+const STAGE_DIR = mkdtempSync(path.join(tmpdir(), 'dsh-electron-stage-'))
 const OUT_DIR = path.join(APP_DIR, 'dist-packaged')
 
 /** Upper bound on gap-fill passes. Each pass places everything one boot attempt reveals, and a placed package can expose its own dependencies on the next pass, so the count tracks dependency depth rather than package count. */
@@ -301,8 +307,8 @@ console.log('[1/4] building the shell')
 rmSync(path.join(APP_DIR, 'tsconfig.tsbuildinfo'), { force: true })
 run(process.execPath, [createRequire(import.meta.url).resolve('typescript/bin/tsc'), '-p', path.join(APP_DIR, 'tsconfig.json')])
 
-console.log('[2/4] staging a flattened dependency closure')
-rmSync(STAGE_DIR, { recursive: true, force: true })
+console.log(`[2/4] staging a flattened dependency closure in ${STAGE_DIR}`)
+// `pnpm deploy` requires an empty target, and mkdtemp just made one.
 run('pnpm', ['--filter', '@deepseek-ai/dsh-electron', 'deploy', STAGE_DIR, '--prod', '--legacy'], {
   // Same reason as above; `deploy` has no non-pnpm equivalent, so the check is
   // disabled explicitly instead of being avoided.

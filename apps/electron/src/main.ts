@@ -8,12 +8,9 @@
  * (the dsh web GUI) is reused completely unchanged over real loopback HTTP —
  * there is no IPC bridge and no preload script.
  *
- * Packaging config (electron-builder/electron-forge) is out of scope for
- * this file; it would live in a `build`/`forge` block added to
- * apps/electron/package.json plus a packaging script that stages
- * apps/cli/lib, apps/cli/config, and the CLI's full runtime dependency
- * closure (including apps/web/dist) into the packaged app's resources —
- * see the ranked packaging risks in the blueprint this app was built from.
+ * Packaging lives in `scripts/package.mjs` and `electron-builder.config.cjs`,
+ * which stage the CLI's runtime dependency closure as real directories before
+ * electron-builder runs; that script's own module comment owns why.
  * @module @deepseek-ai/dsh-electron/main
  */
 
@@ -36,11 +33,10 @@ const require = createRequire(import.meta.url)
  * apps/electron/assets). Resolved relative to this module's own file rather
  * than process.cwd() so it works the same run from src (dev, via a JS/ESM
  * loader) or the built lib/main.js: both sit one directory above `assets`.
- * Packaging config (electron-builder/electron-forge - see the module doc
- * comment above) will point at assets/icon.icns and assets/icon.ico
- * directly for the packaged build's real app icon; this constant only
- * covers wiring an icon in at runtime for unpackaged dev-mode runs (Dock
- * icon on macOS, BrowserWindow icon on Windows).
+ * A packaged build takes its real app icon from `assets/icon.icns` and
+ * `assets/icon.ico` through electron-builder; this constant only covers
+ * wiring an icon in at runtime for unpackaged dev-mode runs (Dock icon on
+ * macOS, BrowserWindow icon on Windows).
  */
 const ASSETS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'assets')
 
@@ -307,7 +303,16 @@ async function bootHost(env: NodeJS.ProcessEnv): Promise<{ url: string; child: C
   if (child.pid !== undefined) await recordRunningHost(app.getPath('userData'), { pid: child.pid, bin: cliBinPath })
 
   const url = `http://127.0.0.1:${String(port)}`
-  await waitForServerReady(url, child)
+  try {
+    await waitForServerReady(url, child)
+  } catch (error) {
+    // The caller never receives this child, so nothing else can shut it down.
+    // A host that started but never answered is still holding its port and
+    // whatever it spawned.
+    child.kill('SIGKILL')
+    await clearRunningHost(app.getPath('userData'))
+    throw error
+  }
   return { url, child }
 }
 
@@ -319,12 +324,23 @@ async function bootHost(env: NodeJS.ProcessEnv): Promise<{ url: string; child: C
 async function shutdownHost(): Promise<void> {
   const child = dshProcess
   dshProcess = undefined
-  if (child === undefined || child.exitCode !== null) return
+  // A signal-terminated child reports its cause in `signalCode` and leaves
+  // `exitCode` null, so testing the exit code alone reads a dead child as live.
+  if (child === undefined || hasExited(child)) return
   const gone = new Promise<void>((resolve) => { child.once('exit', () => { resolve() }) })
   child.kill('SIGTERM')
   await Promise.race([gone, delay(SHUTDOWN_GRACE_MS)])
-  if (child.exitCode === null) child.kill('SIGKILL')
+  if (!hasExited(child)) child.kill('SIGKILL')
   await clearRunningHost(app.getPath('userData'))
+}
+
+/**
+ * Reports whether a child process has terminated, by either cause.
+ * @param child - the child process to test.
+ * @returns true once it has exited or been killed by a signal.
+ */
+function hasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null
 }
 
 async function createWindow(env: NodeJS.ProcessEnv): Promise<void> {
@@ -396,7 +412,25 @@ const PRODUCT_NAME = 'DeepSeek Harness'
 // Before any app.getPath call: those resolve against the name.
 app.setName(PRODUCT_NAME)
 
+// A second launch must not run at all. Two instances would each manage a host
+// of their own, and the orphan reaper — which cannot distinguish a previous
+// run's abandoned host from a concurrent run's live one — would make the
+// second launch kill the first's. Focus the existing window instead.
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow === undefined) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  })
+}
+
 app.whenReady().then(async () => {
+  // Losing the lock means another instance owns the host; quitting is already
+  // under way and this one must touch neither the record nor its host.
+  if (!app.hasSingleInstanceLock()) return
+
   // Before this run spawns its own child, so a previous run's survivor cannot
   // outlive a second launch (and cannot still hold a port or subprocesses).
   const reaped = await reapOrphanedHost(app.getPath('userData'))
@@ -417,7 +451,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', (event) => {
-  if (dshProcess === undefined || dshProcess.exitCode !== null) return
+  if (dshProcess === undefined || hasExited(dshProcess)) return
   event.preventDefault()
   void shutdownHost().finally(() => { app.exit(0) })
 })

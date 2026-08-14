@@ -77,7 +77,12 @@ module.exports = {
   },
   win: {
     icon: 'assets/icon.ico',
-    target: [{ target: 'nsis', arch: ['x64', 'arm64'] }],
+    // Host architecture only, for the same reason the packaging script refuses
+    // a foreign platform: the staged dependency closure carries the native
+    // binaries the build host installed, and `afterPack` copies that one tree
+    // into every architecture built here. A second arch would ship the host's
+    // binaries under the wrong name.
+    target: [{ target: 'nsis', arch: ['x64'] }],
   },
   nsis: {
     // A guided installer rather than the one-click default: the user picks the
