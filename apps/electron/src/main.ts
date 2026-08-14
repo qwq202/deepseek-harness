@@ -110,7 +110,9 @@ async function resolveLoginShellEnvironment(): Promise<NodeJS.ProcessEnv> {
   const command = `echo ${SHELL_ENV_DELIMITER}; env; echo ${SHELL_ENV_DELIMITER}`
   const stdout = await new Promise<string>((resolve, reject) => {
     execFile(shell, ['-ilc', command], { timeout: 10_000 }, (error, stdoutResult) => {
-      if (error) { reject(error); return }
+      // Rewrapped rather than passed through: execFile's exception type is not
+      // recognized as an Error by the lint rule guarding rejection reasons.
+      if (error !== null) { reject(new Error(error.message, { cause: error })); return }
       resolve(stdoutResult)
     })
   })
@@ -294,8 +296,9 @@ async function bootHost(env: NodeJS.ProcessEnv): Promise<{ url: string; child: C
 
   // Forwarded unconditionally (not just on failure) so a packaged app's
   // logs show the child's own boot diagnostics without extra plumbing.
-  child.stdout?.on('data', (chunk: Buffer) => { console.log(`[dsh web] ${chunk.toString().replace(/\n$/, '')}`) })
-  child.stderr?.on('data', (chunk: Buffer) => { console.error(`[dsh web] ${chunk.toString().replace(/\n$/, '')}`) })
+  // Non-null: the spawn above pipes both streams.
+  child.stdout.on('data', (chunk: Buffer) => { console.log(`[dsh web] ${chunk.toString().replace(/\n$/, '')}`) })
+  child.stderr.on('data', (chunk: Buffer) => { console.error(`[dsh web] ${chunk.toString().replace(/\n$/, '')}`) })
 
   // Recorded before readiness: a child that dies during boot is still a
   // process this run spawned, and a crash in between would otherwise leave it
