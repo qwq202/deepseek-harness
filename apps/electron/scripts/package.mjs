@@ -66,10 +66,12 @@ const BOOT_PROBE_TIMEOUT_MS = 90_000
 function run(command, args, options = {}) {
   // Windows exposes npm-installed launchers (`pnpm`, `electron-builder`) as
   // `.cmd` shims, and Node refuses to execute a batch file without a shell.
-  // Everything passed through here is a path or a plain flag, so quoting each
-  // token is enough to survive cmd.exe's parsing.
+  // Only tokens that would otherwise be split are quoted: a quoted command name
+  // changes how cmd.exe resolves the shim, and the batch file then reads its
+  // own directory as the working directory and looks for its payload in the
+  // wrong place.
   const shell = process.platform === 'win32'
-  const quote = value => (shell ? `"${value}"` : value)
+  const quote = value => (shell && /[\s&|<>^]/.test(value) ? `"${value}"` : value)
   const result = spawnSync(quote(command), args.map(quote), { stdio: 'inherit', cwd: REPO_ROOT, shell, ...options })
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} exited with ${result.status ?? `signal ${result.signal}`}`)
