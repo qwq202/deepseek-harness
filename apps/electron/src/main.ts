@@ -26,6 +26,7 @@ import { createServer } from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { app, BrowserWindow, dialog } from 'electron'
+import { clearRunningHost, reapOrphanedHost, recordRunningHost } from './orphan-host.ts'
 import { TOP_BAND_HEIGHT_PX, TOP_BAND_SPLIT_SCRIPT, WINDOW_CHROME_CSS } from './window-chrome.ts'
 
 const require = createRequire(import.meta.url)
@@ -300,6 +301,11 @@ async function bootHost(env: NodeJS.ProcessEnv): Promise<{ url: string; child: C
   child.stdout?.on('data', (chunk: Buffer) => { console.log(`[dsh web] ${chunk.toString().replace(/\n$/, '')}`) })
   child.stderr?.on('data', (chunk: Buffer) => { console.error(`[dsh web] ${chunk.toString().replace(/\n$/, '')}`) })
 
+  // Recorded before readiness: a child that dies during boot is still a
+  // process this run spawned, and a crash in between would otherwise leave it
+  // unaccounted for.
+  if (child.pid !== undefined) await recordRunningHost(app.getPath('userData'), { pid: child.pid, bin: cliBinPath })
+
   const url = `http://127.0.0.1:${String(port)}`
   await waitForServerReady(url, child)
   return { url, child }
@@ -318,6 +324,7 @@ async function shutdownHost(): Promise<void> {
   child.kill('SIGTERM')
   await Promise.race([gone, delay(SHUTDOWN_GRACE_MS)])
   if (child.exitCode === null) child.kill('SIGKILL')
+  await clearRunningHost(app.getPath('userData'))
 }
 
 async function createWindow(env: NodeJS.ProcessEnv): Promise<void> {
@@ -390,6 +397,11 @@ const PRODUCT_NAME = 'DeepSeek Harness'
 app.setName(PRODUCT_NAME)
 
 app.whenReady().then(async () => {
+  // Before this run spawns its own child, so a previous run's survivor cannot
+  // outlive a second launch (and cannot still hold a port or subprocesses).
+  const reaped = await reapOrphanedHost(app.getPath('userData'))
+  if (reaped !== undefined) console.log(`[dsh-electron] terminated an orphaned dsh web host (pid ${String(reaped)}) left by a previous run`)
+
   const env = await resolveEnvironment()
   resolvedEnvironment = env
   await createWindow(env)
