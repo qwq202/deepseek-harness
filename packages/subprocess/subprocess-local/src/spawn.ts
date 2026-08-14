@@ -346,7 +346,9 @@ export function spawnSubprocess(spec: SubprocessSpawnSpec, internals: SpawnInter
   const errMode = spec.stdio.stderr
   const stdinMode = spec.stdio.stdin
 
-  const env = childEnv(spec.env)
+  // A self-relaunch through `process.execPath` needs ELECTRON_RUN_AS_NODE:
+  // under Electron that path is the app binary, not a plain Node interpreter.
+  const env = childEnv(program === process.execPath ? { ELECTRON_RUN_AS_NODE: '1', ...spec.env } : spec.env)
   const child = spawn(program, args, {
     cwd: spec.cwd,
     env,
