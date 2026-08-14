@@ -263,11 +263,23 @@ function resolveInstalledPackage(name) {
 // Resolved rather than path-joined: pnpm installs `electron` under the package
 // that declares it, not at the workspace root.
 const electronPackageJson = createRequire(import.meta.url).resolve('electron/package.json')
+const electronDir = path.dirname(electronPackageJson)
 const electronVersion = JSON.parse(readFileSync(electronPackageJson, 'utf8')).version
+
+// `path.txt` and `dist/` are written by electron's own postinstall, which
+// downloads the platform binary. pnpm does not always run it — on GitHub's
+// runners the other build scripts in this workspace run while electron's does
+// not — so rather than depending on install-time behaviour, fetch the binary
+// here when it is absent. electron's installer is idempotent and exits quickly
+// once the download is already cached.
+if (!existsSync(path.join(electronDir, 'path.txt'))) {
+  console.log('[0/4] fetching the Electron binary (its postinstall did not run)')
+  run(process.execPath, [path.join(electronDir, 'install.js')], { cwd: electronDir })
+}
+
 /** The Electron executable itself, used to probe the staged tree exactly as the packaged app will run it. */
-const electronBin = readFileSync(path.join(path.dirname(electronPackageJson), 'path.txt'), 'utf8').trim()
-const electronExecutable = path.join(path.dirname(electronPackageJson), 'dist', electronBin)
-if (!existsSync(electronExecutable)) throw new Error(`packaging: the Electron binary is missing at ${electronExecutable}; run \`pnpm install\` at the repo root first.`)
+const electronExecutable = path.join(electronDir, 'dist', readFileSync(path.join(electronDir, 'path.txt'), 'utf8').trim())
+if (!existsSync(electronExecutable)) throw new Error(`packaging: the Electron binary is missing at ${electronExecutable} even after running its installer.`)
 
 for (const required of [path.join(REPO_ROOT, 'apps', 'cli', 'lib', 'bin.js'), path.join(REPO_ROOT, 'apps', 'web', 'dist', 'index.html')]) {
   if (!existsSync(required)) throw new Error(`packaging: ${required} is missing; run \`pnpm run build\` at the repo root first.`)
