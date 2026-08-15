@@ -87,9 +87,11 @@ jobs:
     name: package (${{ matrix.platform }})
     needs: plan
     runs-on: ${{ matrix.runner }}
-    # The gap-fill step boots the staged host once per pass, and the packaged
-    # tree is large enough that archiving is slow; this is generous on purpose.
-    timeout-minutes: 60
+    # The gap-fill step boots the staged host once per pass, and the Windows
+    # installer compresses every file in the dependency closure individually
+    # because this build ships unarchived. Headroom over the observed worst
+    # case rather than a target.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:

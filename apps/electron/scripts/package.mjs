@@ -249,6 +249,34 @@ function gapFill(names, index) {
 }
 
 /**
+ * Deletes type declarations and source maps from a staged tree.
+ *
+ * Node loads neither at runtime, and in this dependency closure they are about
+ * fourteen thousand files — the dominant contributor to both the packaged size
+ * and to how long the Windows installer spends compressing, which was enough to
+ * exceed the CI job's time limit.
+ * @param dir - directory to walk.
+ * @returns the number of files removed.
+ */
+function pruneBuildTimeFiles(dir) {
+  let removed = 0
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const target = path.join(dir, entry.name)
+    // Symlinks are left alone: the staged tree's own internal links must keep
+    // pointing where the deploy resolved them, and walking through one would
+    // prune the same real directory repeatedly.
+    if (entry.isSymbolicLink()) continue
+    if (entry.isDirectory()) {
+      removed += pruneBuildTimeFiles(target)
+    } else if (entry.name.endsWith('.d.ts') || entry.name.endsWith('.d.mts') || entry.name.endsWith('.d.cts') || entry.name.endsWith('.map')) {
+      rmSync(target, { force: true })
+      removed += 1
+    }
+  }
+  return removed
+}
+
+/**
  * Locates an installed third-party package's real directory.
  *
  * Tries ordinary resolution from the repo root first, then pnpm's content-
@@ -331,7 +359,8 @@ for (;;) {
   if (placed.length === 0) throw new Error(`packaging: still missing ${[...missing].join(', ')}, but none could be placed.`)
 }
 
-console.log('[4/4] running electron-builder')
+console.log('[4/4] pruning build-time-only files, then running electron-builder')
+console.log(`      removed ${String(pruneBuildTimeFiles(path.join(STAGE_DIR, 'node_modules')))} type-declaration and source-map files`)
 rmSync(OUT_DIR, { recursive: true, force: true })
 // Run from the staged tree so electron-builder treats it as the project, but
 // invoke the binary by resolved path: the staging directory is a deploy output,
