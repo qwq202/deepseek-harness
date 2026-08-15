@@ -31,7 +31,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { createConnection } from 'node:net'
+import { createConnection, createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -48,11 +48,11 @@ const REPO_ROOT = path.resolve(APP_DIR, '..', '..')
  * complete tree that is in fact missing packages — a failure that only
  * surfaces once the app is packaged and no longer has the repo above it.
  *
- * Freshly created, because this script deletes the staging tree recursively.
- * A fixed name under a world-writable temp directory can be pre-created as a
- * symlink or junction pointing somewhere else, which turns that delete into a
- * delete of the link's target. `mkdtemp` returns a new directory that no other
- * user could have prepared.
+ * Freshly created, because this script deletes the staging tree when it
+ * finishes. A fixed name under a world-writable temp directory can be
+ * pre-created as a symlink or junction pointing somewhere else, which turns
+ * that delete into a delete of the link's target. `mkdtemp` returns a
+ * directory no other user could have prepared.
  */
 const STAGE_DIR = mkdtempSync(path.join(tmpdir(), 'dsh-electron-stage-'))
 const OUT_DIR = path.join(APP_DIR, 'dist-packaged')
@@ -181,8 +181,10 @@ async function probeStagedBoot(port) {
 
   child.kill('SIGKILL')
 
-  if (settled === 'ready') return new Set()
   const missing = new Set()
+  // Collected before the readiness verdict is trusted: the host binds its port
+  // before it finishes activating plugins, so a boot that listened and then
+  // failed would otherwise be read as a complete tree.
   for (const match of output.matchAll(/Cannot find (?:package|module) '([^']+)'/g)) {
     // Node reports the bare specifier; a deep import names its package root.
     const specifier = match[1]
@@ -190,9 +192,29 @@ async function probeStagedBoot(port) {
     missing.add(specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0])
   }
   if (missing.size === 0) {
+    if (settled === 'ready') return missing
     throw new Error(`packaging: staged CLI did not become ready (${settled}) and reported no missing packages. Output:\n${output.slice(-4000)}`)
   }
   return missing
+}
+
+/**
+ * Obtains an OS-assigned free loopback port.
+ *
+ * A fixed port would let anything already listening on it — a leftover probe, a
+ * local service — answer for the staged host, and the probe would report a
+ * complete tree without ever having booted one.
+ * @returns a currently-free port.
+ */
+function pickFreePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer()
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address()
+      probe.close(() => { resolve(port) })
+    })
+  })
 }
 
 /**
@@ -349,7 +371,7 @@ let pass = 0
 for (;;) {
   pass += 1
   if (pass > MAX_GAP_FILL_PASSES) throw new Error(`packaging: gap fill did not converge in ${MAX_GAP_FILL_PASSES} passes.`)
-  const missing = await probeStagedBoot(31000 + pass)
+  const missing = await probeStagedBoot(await pickFreePort())
   if (missing.size === 0) {
     console.log(`      staged host booted after ${pass - 1} gap-fill pass(es)`)
     break
@@ -381,5 +403,9 @@ run(builderBin, ['--config', path.join(APP_DIR, 'electron-builder.config.cjs'), 
   cwd: STAGE_DIR,
   env: { ...process.env, DSH_ELECTRON_STAGE: STAGE_DIR, DSH_ELECTRON_OUT: OUT_DIR, DSH_ELECTRON_VERSION: electronVersion },
 })
+
+// The staged closure is a full copy of the dependency tree; leaving it behind
+// fills the temp directory a gigabyte at a time across repeated builds.
+rmSync(STAGE_DIR, { recursive: true, force: true })
 
 console.log(`\npackaged into ${OUT_DIR}`)

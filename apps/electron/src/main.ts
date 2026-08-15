@@ -55,6 +55,30 @@ let dshProcess: ChildProcess | undefined
 let mainWindow: BrowserWindow | undefined
 /** Environment resolved once at startup (see {@link resolveEnvironment}), reused by `activate`-triggered reboots. */
 let resolvedEnvironment: NodeJS.ProcessEnv | undefined
+/**
+ * Serializes every start and stop of the host.
+ *
+ * Starting is not atomic — picking a port, spawning, and polling for readiness
+ * take up to {@link READY_TIMEOUT_MS} — and for all of it there is no window
+ * yet, which is exactly the condition `activate` starts one on. Left
+ * unserialized a launch and an `activate` each spawn a host, only the second is
+ * tracked, and the first becomes an untracked orphan; a shutdown overlapping a
+ * restart likewise clears the record the restart just wrote.
+ */
+let hostTransition: Promise<unknown> = Promise.resolve()
+
+/**
+ * Queues one host lifecycle transition behind those already pending.
+ * @param work - the transition to run once the queue drains.
+ * @returns settles when this transition finishes.
+ */
+function queueHostTransition(work: () => Promise<void>): Promise<void> {
+  // Predecessors' failures do not cancel the queue: a boot that failed still
+  // has to let the next shutdown or retry run.
+  const queued = hostTransition.then(work, work)
+  hostTransition = queued.catch(() => undefined)
+  return queued
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms) })
@@ -441,14 +465,14 @@ app.whenReady().then(async () => {
 
   const env = await resolveEnvironment()
   resolvedEnvironment = env
-  await createWindow(env)
+  await queueHostTransition(() => createWindow(env))
 }).catch((error: unknown) => {
   console.error('[dsh-electron] startup failed:', error)
   app.quit()
 })
 
 app.on('window-all-closed', () => {
-  void shutdownHost().finally(() => {
+  void queueHostTransition(shutdownHost).finally(() => {
     if (process.platform !== 'darwin') app.quit()
   })
 })
@@ -456,11 +480,17 @@ app.on('window-all-closed', () => {
 app.on('before-quit', (event) => {
   if (dshProcess === undefined || hasExited(dshProcess)) return
   event.preventDefault()
-  void shutdownHost().finally(() => { app.exit(0) })
+  void queueHostTransition(shutdownHost).finally(() => { app.exit(0) })
 })
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0 && resolvedEnvironment !== undefined) {
-    void createWindow(resolvedEnvironment)
-  }
+  const env = resolvedEnvironment
+  if (env === undefined) return
+  void queueHostTransition(async () => {
+    // Re-tested inside the queue: `activate` also fires during the first
+    // launch's own boot, when no window exists yet precisely because that boot
+    // is still running. By the time this turn arrives the window may exist.
+    if (BrowserWindow.getAllWindows().length > 0) return
+    await createWindow(env)
+  })
 })
