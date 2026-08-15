@@ -19,7 +19,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { readFile, rm, writeFile } from 'node:fs/promises'
+import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 /** Identity of the child process a run of this shell is responsible for. */
@@ -50,7 +50,14 @@ function recordPath(userDataDir: string): string {
  * @param record - identity of the spawned child.
  */
 export async function recordRunningHost(userDataDir: string, record: HostRecord): Promise<void> {
-  await writeFile(recordPath(userDataDir), JSON.stringify(record), 'utf8')
+  // Written beside the record and renamed over it, because writing in place
+  // truncates first: a force quit during that window — the very case this
+  // record exists to recover from — would leave an unparseable file, and the
+  // next launch would abandon the surviving host instead of reaping it.
+  const destination = recordPath(userDataDir)
+  const pending = `${destination}.${String(process.pid)}.tmp`
+  await writeFile(pending, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 })
+  await rename(pending, destination)
 }
 
 /**

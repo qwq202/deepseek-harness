@@ -346,9 +346,14 @@ export function spawnSubprocess(spec: SubprocessSpawnSpec, internals: SpawnInter
   const errMode = spec.stdio.stderr
   const stdinMode = spec.stdio.stdin
 
-  // A self-relaunch through `process.execPath` needs ELECTRON_RUN_AS_NODE:
-  // under Electron that path is the app binary, not a plain Node interpreter.
-  const env = childEnv(program === process.execPath ? { ELECTRON_RUN_AS_NODE: '1', ...spec.env } : spec.env)
+  // Relaunching `process.execPath` under Electron re-runs the app binary, not a
+  // plain Node interpreter, unless it is told otherwise. Gated on this process
+  // actually being Electron: under ordinary Node the marker is meaningless, and
+  // adding it anyway would reach every command run through a wrapper that is
+  // itself launched this way — Windows' ACL sandbox runner — turning a
+  // sandboxed Electron application into a headless Node process.
+  const relaunchesElectron = program === process.execPath && process.versions.electron !== undefined
+  const env = childEnv(relaunchesElectron ? { ELECTRON_RUN_AS_NODE: '1', ...spec.env } : spec.env)
   const child = spawn(program, args, {
     cwd: spec.cwd,
     env,

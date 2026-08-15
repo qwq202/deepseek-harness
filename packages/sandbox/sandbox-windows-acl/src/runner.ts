@@ -178,6 +178,16 @@ async function main(): Promise<number> {
       }
     }
 
+    // This runner is itself started through the harness's own executable, so
+    // when that executable is Electron the runner is started in Node mode. The
+    // wrapped command is an unrelated program inheriting this same block, and a
+    // marker left standing would start a sandboxed Electron application as a
+    // headless Node process. Deleted through `process.env` rather than the FFI
+    // above because removing a variable takes a NULL value that the binding's
+    // string parameter cannot express; on Windows this delete reaches the same
+    // Win32 environment block the child inherits.
+    delete process.env.ELECTRON_RUN_AS_NODE
+
     const child = sandbox.spawn({
       command: parsed.command,
       args: parsed.args,
