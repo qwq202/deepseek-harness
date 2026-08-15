@@ -1,0 +1,14 @@
+{
+  // Standalone compile, not part of the root tsc -b project-reference graph
+  // (apps/electron has no dependents inside the workspace's own type-check
+  // surface): `tsc -p` here just emits plain runnable ESM under lib/, the
+  // same "built entry" shape apps/cli ships as lib/bin.js.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib"
+  },
+  "include": [
+    "src"
+  ]
+}

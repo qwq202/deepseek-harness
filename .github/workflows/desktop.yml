@@ -1,0 +1,141 @@
+name: Desktop app
+
+# Packages the Electron desktop shell (apps/electron) for macOS and Windows.
+#
+# Each platform is built on its own runner, never cross-built. The staging step
+# resolves whatever native binaries the host platform installs, and `sharp`
+# publishes one package per platform, so a Windows package staged on macOS
+# would ship no Windows `sharp` and fail at runtime on the first image
+# attachment. `apps/electron/scripts/package.mjs` refuses a foreign target for
+# that reason; this matrix is the supported way to get both.
+#
+# Artifacts are unsigned: the macOS .dmg is ad-hoc signed only, so Gatekeeper
+# gates it on a machine that did not build it. Signing needs paid certificates
+# this repository does not hold; the artifact is for developers who accept a
+# one-time bypass.
+#
+# Windows is opt-in and currently does not finish. Every step up to the
+# installer succeeds — dependencies, build, staging, and the gap-fill probe all
+# pass on a Windows runner — but electron-builder's NSIS step runs for over an
+# hour and then dies with `RangeError: Invalid string length`, because this
+# build ships unarchived and NSIS emits one log line per file for a closure of
+# hundreds of thousands of them. Enabling asar would collapse that to one file,
+# but asar and the `afterPack` dependency repair are mutually exclusive as
+# configured (electron-builder's own dependency walk omits this repo's `link:`
+# overrides, which is what that hook repairs). Resolving that is follow-up work;
+# until then `--platforms windows` reproduces the failure for whoever picks it
+# up.
+#
+# Run manually, or label a pull request `build-desktop` (remove and reapply to
+# rerun).
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: >-
+          Comma-separated platforms to build. Any subset of: macos, windows.
+          Empty builds the verified set (macOS). Windows packaging does not
+          complete yet — see the note above — so it is opt-in.
+        type: string
+        required: false
+        default: ''
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+  # CI runs must never report to the production telemetry endpoint baked
+  # into apps/cli/cordis.yml (AppCLIEntry disables the row when set).
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  # Job-level conditions cannot inspect `matrix`, so the platform list is
+  # validated and expanded before the build job consumes it.
+  plan:
+    name: plan platforms
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'build-desktop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Compute matrix from platforms input
+        id: plan
+        env:
+          # Windows is excluded from the default set until its packaging
+          # completes; pass it explicitly to work on that failure.
+          PLATFORMS: ${{ inputs.platforms || 'macos' }}
+        run: |
+          set -euo pipefail
+          matrix='[]'
+          IFS=',' read -r -a platforms <<< "$PLATFORMS"
+          for raw in "${platforms[@]}"; do
+            p="$(echo "$raw" | xargs)" # trim surrounding whitespace
+            [ -z "$p" ] && continue
+            # macos-latest is Apple Silicon, matching the arm64 dmg target.
+            case "$p" in
+              macos)   runner=macos-latest; artifact='apps/electron/dist-packaged/*.dmg' ;;
+              windows) runner=windows-latest; artifact='apps/electron/dist-packaged/*.exe' ;;
+              *)
+                echo "::error::Unknown platform '$p'. Supported: macos, windows."
+                exit 1
+                ;;
+            esac
+            matrix="$(jq -c --arg platform "$p" --arg runner "$runner" --arg artifact "$artifact" \
+              '. + [{platform: $platform, runner: $runner, artifact: $artifact}]' <<< "$matrix")"
+          done
+          if [ "$matrix" = '[]' ]; then
+            echo "::error::No platforms selected."
+            exit 1
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  package:
+    name: package (${{ matrix.platform }})
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    # The gap-fill step boots the staged host once per pass, and the Windows
+    # installer compresses every file in the dependency closure individually
+    # because this build ships unarchived. Headroom over the observed worst
+    # case rather than a target.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The shell packages the built CLI entry and the built web frontend; both
+      # come from the repository-wide build, not from apps/electron's own.
+      - name: Build the repository
+        run: pnpm run build
+
+      - name: Package the desktop app
+        run: node scripts/package.mjs
+        working-directory: apps/electron
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dsh-desktop-${{ matrix.platform }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,4 @@
+dist-stage/
+dist-packaged/
+lib/
+tsconfig.tsbuildinfo
